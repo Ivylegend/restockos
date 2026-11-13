@@ -1,0 +1,1 @@
+{"name":"restockos","private":true,"workspaces":["apps/web","contracts/procurement-policy"],"type":"module","engines":{"node":">=22.22.2"},"dependencies":{"near-api-js":"7.5.3"},"scripts":{"build":"npm run build -w @restockos/web","test:contract":"npm test -w @restockos/policy","build:contract":"npm run build -w @restockos/policy"}}

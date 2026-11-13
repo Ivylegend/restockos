@@ -1,0 +1,12 @@
+{
+  "name": "@restockos/policy",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node ../../scripts/build-contract.mjs",
+    "test": "node --test test/*.test.ts"
+  },
+  "dependencies": {
+    "near-sdk-js": "2.0.0"
+  }
+}

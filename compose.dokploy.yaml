@@ -1,0 +1,50 @@
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: restockos
+      POSTGRES_USER: restockos
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in Dokploy}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U restockos -d restockos"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    volumes:
+      - restock-data:/var/lib/postgresql/data
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PORT: "8000"
+      DATABASE_URL: postgresql+psycopg://restockos:${POSTGRES_PASSWORD}@db:5432/restockos
+      OWNER_TOKEN: ${OWNER_TOKEN:?Set OWNER_TOKEN in Dokploy}
+      DEMO_ENABLED: "true"
+      NEAR_RPC_URL: ${NEAR_RPC_URL:-https://rpc.testnet.near.org}
+      NEAR_CONTRACT_ID: ${NEAR_CONTRACT_ID:-}
+      NEAR_AGENT_ID: ${NEAR_AGENT_ID:-}
+      NEAR_AGENT_PRIVATE_KEY: ${NEAR_AGENT_PRIVATE_KEY:-}
+      DEMO_SUPPLIER_ACCOUNTS: ${DEMO_SUPPLIER_ACCOUNTS:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    expose:
+      - "3000"
+volumes:
+  restock-data:
