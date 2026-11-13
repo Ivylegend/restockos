@@ -1,7 +1,7 @@
 """Create procurement tables
 
 Revision ID: 69979f29be0a
-Revises: 
+Revises:
 Create Date: 2026-11-13 23:20:10.036968
 
 """
