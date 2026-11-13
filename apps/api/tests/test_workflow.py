@@ -89,3 +89,22 @@ def test_procurement_requires_chain_evidence_and_receives_once(workspace, monkey
     assert client.post(endpoint + "/receive", headers=OWNER).json()["status"] == "received"
     assert client.post(endpoint + "/receive", headers=OWNER).status_code == 409
     assert client.get("/products", headers=OWNER).json()[0]["stock"] == 40
+
+
+def test_public_demo_allows_reads_only(workspace, monkeypatch):
+    client, _ = workspace
+    monkeypatch.setattr(settings, "public_demo", True)
+    assert client.get("/demo/access").json()["public_read_only"]
+    for path in ("/dashboard/summary", "/products", "/suppliers", "/quotes", "/purchase-orders",
+                 "/agent/runs", "/transactions", "/treasury"):
+        assert client.get(path).status_code == 200, path
+    for method, path in (
+        ("GET", "/agent/policy"), ("GET", "/workspace"), ("PUT", "/agent/policy"),
+        ("POST", "/products"), ("PATCH", "/products/1"), ("POST", "/agent/run"),
+        ("POST", "/purchase-orders/missing/execute"), ("POST", "/purchase-orders/missing/receive"),
+        ("POST", "/demo/reset"),
+    ):
+        assert client.request(method, path, json={} if method != "GET" else None).status_code == 401, path
+    monkeypatch.setattr(settings, "demo_enabled", False)
+    assert not client.get("/demo/access").json()["public_read_only"]
+    assert client.get("/products").status_code == 401

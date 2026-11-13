@@ -4,6 +4,10 @@ RestockOS helps an electronics retailer restock before a stockout. The agent fin
 
 Built for **NEAR HACKATHON 2026** · Primary track **Autonomous Business** (`business`). [Live rules](https://nearhackathon.com/HACKATHON.md) · [Track starter](https://github.com/nearai/near-hackathon-prompt-examples/blob/main/tracks/04-business.md)
 
+## Hosted judge demo
+
+Open the [public demo dashboard](https://restockos-restockos-stack-ogkaac-a88c69-194-31-150-55.sslip.io) without signing in. Follow the charger shortage in Overview, the three offers in Suppliers, the decision log in Procurement agent, and the paid and rejected receipts in [Treasury](https://restockos-restockos-stack-ogkaac-a88c69-194-31-150-55.sslip.io/treasury). The workspace contains seeded Testnet data. Owner authentication is required for settings, inventory changes, agent runs, payments, and resets.
+
 ## Verified Testnet demo
 
 | Evidence | Result |
@@ -55,6 +59,7 @@ In another terminal at the repository root, run `npm run dev -w @restockos/web`.
 | `AUTOMATION_TOKEN` | Optional token for normal scans through `POST /agent/run` |
 | `WEB_ORIGIN` | Exact dashboard origin for CORS |
 | `NEXT_PUBLIC_API_URL` | Public API origin, baked into the dashboard build |
+| `PUBLIC_DEMO` | Enables anonymous read access to operational demo data when `DEMO_ENABLED` is also on. Enable only on a seeded demo workspace |
 | `DEMO_ENABLED` | Enables owner-only redirected quote and demo inventory reset |
 | `SCAN_INTERVAL_SECONDS` | In-process scan frequency, with zero disabling it. Only scans when auto-execution is enabled and the workspace is unpaused |
 | `NEAR_RPC_URL`, `NEAR_CONTRACT_ID`, `NEAR_AGENT_ID` | Testnet connection and account IDs |

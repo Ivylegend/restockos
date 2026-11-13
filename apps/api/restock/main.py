@@ -68,6 +68,16 @@ def owner(authorization: Annotated[str | None, Header()] = None):
     authorized(authorization, settings.owner_token)
 
 
+def viewer(authorization: Annotated[str | None, Header()] = None):
+    if not (settings.demo_enabled and settings.public_demo):
+        owner(authorization)
+
+
+@app.get("/demo/access")
+def demo_access():
+    return {"public_read_only": settings.demo_enabled and settings.public_demo}
+
+
 def operator(authorization: Annotated[str | None, Header()] = None):
     authorized(authorization, settings.owner_token, settings.automation_token)
 
@@ -91,7 +101,7 @@ def health(db: DB):
     return {"status": "ok", "network": "testnet"}
 
 
-@app.get("/dashboard/summary", dependencies=[Depends(owner)])
+@app.get("/dashboard/summary", dependencies=[Depends(viewer)])
 def dashboard(db: DB):
     products = db.scalars(select(Product).order_by(Product.id)).all()
     orders = db.scalars(select(PurchaseOrder)).all()
@@ -108,7 +118,7 @@ def dashboard(db: DB):
     }
 
 
-@app.get("/products", dependencies=[Depends(owner)])
+@app.get("/products", dependencies=[Depends(viewer)])
 def products(db: DB):
     return [row(p) for p in db.scalars(select(Product).order_by(Product.id))]
 
@@ -143,17 +153,17 @@ def update_product(product_id: int, payload: StockUpdate, db: DB):
     return row(product)
 
 
-@app.get("/suppliers", dependencies=[Depends(owner)])
+@app.get("/suppliers", dependencies=[Depends(viewer)])
 def suppliers(db: DB):
     return [row(s) for s in db.scalars(select(Supplier).order_by(Supplier.id))]
 
 
-@app.get("/quotes", dependencies=[Depends(owner)])
+@app.get("/quotes", dependencies=[Depends(viewer)])
 def quotes(db: DB):
     return [row(q) for q in db.scalars(select(SupplierQuote).order_by(SupplierQuote.id.desc()).limit(150))]
 
 
-@app.get("/purchase-orders", dependencies=[Depends(owner)])
+@app.get("/purchase-orders", dependencies=[Depends(viewer)])
 def orders(db: DB):
     query = (select(PurchaseOrder, PurchaseOrderItem, Product.name, Supplier.name, BlockchainTransaction.hash)
              .select_from(PurchaseOrder)
@@ -197,7 +207,7 @@ def run_agent(db: DB, payload: RunInput = RunInput(), authorization: Annotated[s
     return {**row(run), "order": row(order) if order else None}
 
 
-@app.get("/agent/runs", dependencies=[Depends(owner)])
+@app.get("/agent/runs", dependencies=[Depends(viewer)])
 def runs(db: DB):
     records = db.scalars(select(AgentRun).order_by(AgentRun.created_at.desc()).limit(30)).all()
     events = db.scalars(select(AuditEvent).where(AuditEvent.run_id.in_([r.id for r in records])).order_by(AuditEvent.id))
@@ -227,13 +237,13 @@ def receive(order_id: str, db: DB):
     return row(order)
 
 
-@app.get("/transactions", dependencies=[Depends(owner)])
+@app.get("/transactions", dependencies=[Depends(viewer)])
 def transactions(db: DB):
     records = db.scalars(select(BlockchainTransaction).order_by(BlockchainTransaction.created_at.desc()).limit(100))
     return [row(tx, omit=("signed_payload",)) for tx in records]
 
 
-@app.get("/treasury", dependencies=[Depends(owner)])
+@app.get("/treasury", dependencies=[Depends(viewer)])
 def treasury():
     if not settings.near_contract_id:
         return {"contract": None, "policy": None, "error": "Set a NEAR Testnet contract to connect treasury."}

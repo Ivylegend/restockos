@@ -26,6 +26,7 @@ services:
       DATABASE_URL: postgresql+psycopg://restockos:${POSTGRES_PASSWORD}@db:5432/restockos
       OWNER_TOKEN: ${OWNER_TOKEN:?Set OWNER_TOKEN in Dokploy}
       DEMO_ENABLED: "true"
+      PUBLIC_DEMO: "true"
       NEAR_RPC_URL: ${NEAR_RPC_URL:-https://rpc.testnet.near.org}
       NEAR_CONTRACT_ID: ${NEAR_CONTRACT_ID:-}
       NEAR_AGENT_ID: ${NEAR_AGENT_ID:-}

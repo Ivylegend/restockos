@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     near_agent_private_key: str = ""
     demo_supplier_accounts: str = ""
     demo_enabled: bool = False
+    public_demo: bool = False
     scan_interval_seconds: int = 0
     llm_api_key: str = ""
     llm_base_url: str = "https://api.openai.com/v1"

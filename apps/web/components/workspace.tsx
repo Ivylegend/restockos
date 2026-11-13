@@ -24,7 +24,7 @@ const date = (value: string) => new Intl.DateTimeFormat(undefined, {month:'short
 const money = (value: string) => nearAmount(value) + ' NEAR';
 
 async function request<T>(token: string, path: string, method = 'GET', body?: unknown): Promise<T> {
-  const res = await fetch(api + path, {method, headers: {Authorization: 'Bearer ' + token, ...(body ? {'Content-Type':'application/json'} : {})},
+  const res = await fetch(api + path, {method, headers: {...(token ? {Authorization: 'Bearer ' + token} : {}), ...(body ? {'Content-Type':'application/json'} : {})},
     body: body ? JSON.stringify(body) : undefined});
   if (res.status === 204) return undefined as T;
   const data = await res.json().catch(() => ({}));
@@ -51,7 +51,9 @@ function Shell({ page, token, access, hydrated }: {page:Page; token:string; acce
   const [unlockError, setUnlockError] = useState('');
   const [notice, setNotice] = useState('');
   const client = useQueryClient();
-  const overview = useQuery({queryKey:['summary'], queryFn:()=>request<Summary>(token,'/dashboard/summary'), enabled:!!token && page==='overview', refetchInterval:6000});
+  const demoAccess = useQuery({queryKey:['demo-access'],queryFn:()=>request<{public_read_only:boolean}>('','/demo/access'),enabled:hydrated});
+  const guest = !token && demoAccess.data?.public_read_only === true;
+  const overview = useQuery({queryKey:['summary'], queryFn:()=>request<Summary>(token,'/dashboard/summary'), enabled:(!!token || guest) && page==='overview', refetchInterval:6000});
   const policy = useQuery({queryKey:['policy'], queryFn:()=>request<Policy>(token,'/agent/policy'), enabled:!!token});
   const workspace = useQuery({queryKey:['workspace'], queryFn:()=>request<{demo_enabled:boolean}>(token,'/workspace'), enabled:!!token});
   const run = useMutation({
@@ -60,6 +62,7 @@ function Shell({ page, token, access, hydrated }: {page:Page; token:string; acce
     onError:(err)=>setNotice(err.message),
   });
   const current = pages[page];
+  const showUnlock = !token && (page==='settings' || !guest);
   async function unlock(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const value = String(new FormData(event.currentTarget).get('token') || '').trim();
@@ -77,18 +80,18 @@ function Shell({ page, token, access, hydrated }: {page:Page; token:string; acce
     </aside>
     {mobile && <button className="scrim" aria-label="Close navigation" onClick={()=>setMobile(false)}/>}
     <div className="main-frame">
-      <header className="topbar"><div className="breadcrumb"><button className="mobile-menu" aria-label="Open navigation" onClick={()=>setMobile(true)}><Menu size={22}/></button><span>Workspace</span><span>/</span><strong>{current.label}</strong></div><div className="header-right"><Badge variant="info"><span className="dot"/>Testnet</Badge><span className="avatar" aria-label="Workspace owner">NL</span></div></header>
+      <header className="topbar"><div className="breadcrumb"><button className="mobile-menu" aria-label="Open navigation" onClick={()=>setMobile(true)}><Menu size={22}/></button><span>Workspace</span><span>/</span><strong>{current.label}</strong></div><div className="header-right">{guest && <Badge>Read-only demo</Badge>}<Badge variant="info"><span className="dot"/>Testnet</Badge><span className="avatar" aria-label="Workspace owner">NL</span></div></header>
       <main>
         <div className="page-heading"><div><div className="eyebrow"><span className="dot"/>{page==='overview'?'OPERATIONS CENTER':'NORTHLINE ELECTRONICS'}</div><h1>{current.title}</h1><p>{current.description}</p></div>
           {token && (page==='overview'||page==='agent') && <Button onClick={()=>run.mutate('normal')} disabled={run.isPending || policy.data?.paused}><Play size={16}/>{run.isPending?'Running procurement…':'Run procurement'}</Button>}
         </div>
         {notice && <div className="notice" role="status"><Activity size={16}/>{notice}<button aria-label="Dismiss message" onClick={()=>setNotice('')}><X size={16}/></button></div>}
-        {!hydrated ? <Loading/> : !token ? <section className="panel unlock"><div className="feature-icon"><ShieldCheck size={24}/></div><h2>Unlock workspace</h2><p>Enter the owner access token from your RestockOS environment.</p><form onSubmit={unlock}><label>Access token<input name="token" type="password" required autoComplete="off" placeholder="Workspace token"/></label><Button>Unlock workspace <ArrowRight size={16}/></Button></form>{unlockError && <ErrorState error={unlockError}/>}</section> :
+        {!hydrated || (!token && demoAccess.isPending) ? <Loading/> : showUnlock ? <section className="panel unlock"><div className="feature-icon"><ShieldCheck size={24}/></div><h2>Unlock owner controls</h2><p>Enter the owner token to manage inventory, execute payments, or edit settings.</p><form onSubmit={unlock}><label>Access token<input name="token" type="password" required autoComplete="off" placeholder="Workspace token"/></label><Button>Unlock workspace <ArrowRight size={16}/></Button></form>{unlockError && <ErrorState error={unlockError}/>}</section> :
           <>
             {page==='overview' && <QueryView query={overview}>{data=><Overview data={data} policy={policy.data}/>}</QueryView>}
             {page==='inventory' && <Inventory token={token}/>}
             {page==='suppliers' && <Suppliers token={token}/>}
-            {page==='agent' && <Agent token={token} policy={policy.data} demo={workspace.data?.demo_enabled || false} runDemo={()=>run.mutate('redirect')} busy={run.isPending}/>}
+            {page==='agent' && <Agent token={token} policy={policy.data} demo={!!token && (workspace.data?.demo_enabled || false)} runDemo={()=>run.mutate('redirect')} busy={run.isPending}/>}
             {page==='orders' && <Orders token={token}/>}
             {page==='treasury' && <TreasuryPage token={token}/>}
             {page==='settings' && <SettingsPage token={token} policy={policy.data} demo={workspace.data?.demo_enabled || false}/>}
@@ -135,7 +138,7 @@ function Overview({data,policy}: {data:Summary;policy?:Policy}) {
       </Panel>
       <Panel title="Agent activity" subtitle="Latest procurement decisions" action={<Link className="text-link" href="/agent">View runs <ArrowRight size={14}/></Link>}><ActivityFeed events={data.activity.slice(0,5)}/></Panel>
       <Panel title="Catalog by category" subtitle="Tracked SKUs across the workspace"><div className="bars">{data.categories.map(c=><div className="bar-row" key={c.name}><span>{c.name}</span><div><i style={{width:(c.count/Math.max(1,...data.categories.map(v=>v.count)))*100+'%'}}/></div><strong>{c.count}</strong></div>)}</div></Panel>
-      <section className="panel agent-card"><span className="feature-icon"><Bot size={24}/></span><h2>Procurement agent</h2><p>{policy?.paused?'Procurement is paused.':policy?.auto_execute?'Approved purchases can settle automatically.':'Orders wait for manual payment execution.'}</p><Link className="text-link" href="/settings">Manage permissions <ArrowRight size={14}/></Link></section>
+      <section className="panel agent-card"><span className="feature-icon"><Bot size={24}/></span><h2>Procurement agent</h2><p>{!policy?'Review historical procurement runs and verified payments.':policy.paused?'Procurement is paused.':policy?.auto_execute?'Approved purchases can settle automatically.':'Orders wait for manual payment execution.'}</p><Link className="text-link" href={policy?'/settings':'/agent'}>{policy?'Manage permissions':'View procurement runs'} <ArrowRight size={14}/></Link></section>
     </div>
   </>;
 }
@@ -158,11 +161,11 @@ function Inventory({token}: {token:string}) {
     },
     onSuccess:()=>{setEditing(null);client.invalidateQueries();},
   });
-  return <Panel title="Product catalog" subtitle="Stock levels and sales velocity" action={<Button variant="outline" onClick={()=>{save.reset();setEditing('new');}}><Plus size={16}/>Add product</Button>}>
+  return <Panel title="Product catalog" subtitle="Stock levels and sales velocity" action={token && <Button variant="outline" onClick={()=>{save.reset();setEditing('new');}}><Plus size={16}/>Add product</Button>}>
     <div className="table-toolbar"><SearchBox value={filter} onChange={setFilter} placeholder="Search products or SKU"/></div>
     <QueryView query={query}>{data=>{
       const rows = data.filter(p=>matches(filter,p.name,p.sku,p.category));
-      return rows.length ? <div className="table-wrap"><table><thead><tr><th>Product</th><th>Category</th><th>On hand</th><th>Reorder at</th><th>Sales / day</th><th>Status</th><th>Action</th></tr></thead><tbody>{rows.map(p=><tr key={p.id}><td><div className="item-name"><span className="product-icon"><Cpu size={16}/></span><div><strong>{p.name}</strong><small>{p.sku}</small></div></div></td><td>{p.category}</td><td>{p.stock}</td><td>{p.reorder_point}</td><td>{p.daily_sales}</td><td><Badge variant={p.stock<p.reorder_point?'warn':'good'}>{p.stock<p.reorder_point?'Low stock':'In stock'}</Badge></td><td><Button variant="ghost" onClick={()=>{save.reset();setEditing(p);}}>Edit</Button></td></tr>)}</tbody></table></div>:<Empty>No products match your search.</Empty>;
+      return rows.length ? <div className="table-wrap"><table><thead><tr><th>Product</th><th>Category</th><th>On hand</th><th>Reorder at</th><th>Sales / day</th><th>Status</th>{token && <th>Action</th>}</tr></thead><tbody>{rows.map(p=><tr key={p.id}><td><div className="item-name"><span className="product-icon"><Cpu size={16}/></span><div><strong>{p.name}</strong><small>{p.sku}</small></div></div></td><td>{p.category}</td><td>{p.stock}</td><td>{p.reorder_point}</td><td>{p.daily_sales}</td><td><Badge variant={p.stock<p.reorder_point?'warn':'good'}>{p.stock<p.reorder_point?'Low stock':'In stock'}</Badge></td>{token && <td><Button variant="ghost" onClick={()=>{save.reset();setEditing(p);}}>Edit</Button></td>}</tr>)}</tbody></table></div>:<Empty>No products match your search.</Empty>;
     }}</QueryView>
     {editing && <dialog open className="dialog"><div className="dialog-inner"><div className="panel-heading"><h2>{editing==='new'?'Add product':'Edit '+editing.name}</h2><button aria-label="Close editor" onClick={()=>setEditing(null)}><X size={20}/></button></div><form className="form-grid" onSubmit={e=>{e.preventDefault();save.mutate(new FormData(e.currentTarget));}}>
       {editing==='new' && <><label>SKU<input name="sku" required pattern="[A-Z0-9-]+" maxLength={24}/></label><label>Name<input name="name" required maxLength={120}/></label><label>Category<input name="category" required maxLength={60}/></label><label>Unit price in NEAR<input name="price" required inputMode="decimal"/></label></>}
@@ -188,7 +191,7 @@ function Suppliers({token}: {token:string}) {
 
 function Agent({token,policy,demo,runDemo,busy}: {token:string;policy?:Policy;demo:boolean;runDemo:()=>void;busy:boolean}) {
   const query=useQuery({queryKey:['runs'],queryFn:()=>request<Run[]>(token,'/agent/runs'),refetchInterval:5000});
-  return <div className="stack"><section className="panel agent-banner"><span className="feature-icon"><Bot size={24}/></span><div><h2>Autonomous procurement</h2><p>{policy?.auto_execute?'Eligible orders are sent to the policy contract automatically.':'The agent prepares orders for owner execution.'}</p></div><Status value={policy?.paused?'paused':'active'}/></section>
+  return <div className="stack"><section className="panel agent-banner"><span className="feature-icon"><Bot size={24}/></span><div><h2>Autonomous procurement</h2><p>{!token?'Follow the recorded decisions and contract outcomes.':policy?.auto_execute?'Eligible orders are sent to the policy contract automatically.':'The agent prepares orders for owner execution.'}</p></div>{policy && <Status value={policy.paused?'paused':'active'}/>}</section>
     {demo && <Panel title="Policy rejection demo" subtitle="Submit a redirected quote to the contract and inspect the rejection." action={<Button variant="outline" onClick={runDemo} disabled={busy || policy?.paused}><ShieldCheck size={16}/>Run rejection demo</Button>}/>}
     <Panel title="Run history" subtitle="Inventory checks, quote selection, and settlement events"><QueryView query={query}>{runs=>runs.length ? <div className="run-list">{runs.map((run,i)=><details key={run.id} open={i===0||undefined}><summary><div><strong>{run.scenario==='redirect'?'Policy rejection demo':'Procurement scan'}</strong><small>{date(run.created_at)} · {run.mode}</small></div><Status value={run.status}/></summary><ActivityFeed events={run.events}/></details>)}</div>:<Empty>No agent runs yet.</Empty>}</QueryView></Panel></div>;
 }
@@ -201,7 +204,7 @@ function Orders({token}: {token:string}) {
   return <Panel title="Purchase order register" subtitle="Payments and inbound inventory"><div className="table-toolbar"><SearchBox value={filter} onChange={setFilter} placeholder="Search purchase orders"/></div>{update.error && <ErrorState error={update.error.message}/>}
     <QueryView query={query}>{data=>{
       const rows=data.filter(o=>matches(filter,o.id,o.supplier,o.product,o.status));
-      return rows.length?<div className="table-wrap"><table><thead><tr><th>Order / Product</th><th>Supplier</th><th>Quantity</th><th>Amount</th><th>Status</th><th>Action</th></tr></thead><tbody>{rows.map(o=><tr key={o.id}><td><strong>{o.product}</strong><small>PO-{o.id.slice(0,8).toUpperCase()}</small></td><td>{o.supplier}</td><td>{o.quantity}</td><td>{money(o.amount)}</td><td><Status value={o.status}/>{o.reason&&<small className="order-reason">{o.reason}</small>}</td><td className="order-actions">{['ready','paid'].includes(o.status)&&<Button variant="outline" disabled={update.isPending} onClick={()=>update.mutate({id:o.id,action:o.status==='ready'?'execute':'receive'})}>{o.status==='ready'?'Execute':'Receive stock'}</Button>}{o.hash&&<a className="text-link" href={explorer(o.hash)} target="_blank" rel="noreferrer">Explorer <ArrowUpRight size={13}/></a>}</td></tr>)}</tbody></table></div>:<Empty>No purchase orders match your search.</Empty>;
+      return rows.length?<div className="table-wrap"><table><thead><tr><th>Order / Product</th><th>Supplier</th><th>Quantity</th><th>Amount</th><th>Status</th><th>Action</th></tr></thead><tbody>{rows.map(o=><tr key={o.id}><td><strong>{o.product}</strong><small>PO-{o.id.slice(0,8).toUpperCase()}</small></td><td>{o.supplier}</td><td>{o.quantity}</td><td>{money(o.amount)}</td><td><Status value={o.status}/>{o.reason&&<small className="order-reason">{o.reason}</small>}</td><td className="order-actions">{token && ['ready','paid'].includes(o.status)&&<Button variant="outline" disabled={update.isPending} onClick={()=>update.mutate({id:o.id,action:o.status==='ready'?'execute':'receive'})}>{o.status==='ready'?'Execute':'Receive stock'}</Button>}{o.hash&&<a className="text-link" href={explorer(o.hash)} target="_blank" rel="noreferrer">Explorer <ArrowUpRight size={13}/></a>}</td></tr>)}</tbody></table></div>:<Empty>No purchase orders match your search.</Empty>;
     }}</QueryView></Panel>;
 }
 
