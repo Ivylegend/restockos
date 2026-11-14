@@ -1,0 +1,12 @@
+import sharp from 'sharp';
+import {readFile,writeFile} from 'node:fs/promises';
+import path from 'node:path';
+const app=path.resolve(import.meta.dirname,'../apps/web/app');
+const svg=await readFile(path.join(app,'icon.svg'));
+await sharp(svg).resize(180,180).png().toFile(path.join(app,'apple-icon.png'));
+const entries=await Promise.all([16,32,48].map(async size=>({size,png:await sharp(svg).resize(size,size).png().toBuffer()})));
+const header=Buffer.alloc(6+16*entries.length);header.writeUInt16LE(1,2);header.writeUInt16LE(entries.length,4);
+let offset=header.length;
+entries.forEach(({size,png},index)=>{const at=6+16*index;header[at]=size;header[at+1]=size;header.writeUInt16LE(1,at+4);header.writeUInt16LE(32,at+6);header.writeUInt32LE(png.length,at+8);header.writeUInt32LE(offset,at+12);offset+=png.length;});
+await writeFile(path.join(app,'favicon.ico'),Buffer.concat([header,...entries.map(e=>e.png)]));
+console.log('Built SVG, 16/32/48px ICO and 180px Apple icon.');

@@ -1,0 +1,5 @@
+Empty shelves cost sales. I built RestockOS at NEAR HACKATHON: 3 supplier quotes, negotiated orders, NEAR Testnet spending caps and supplier allowlists.
+Try: https://restockos-restockos-stack-ogkaac-a88c69-194-31-150-55.sslip.io/
+Code: https://github.com/Ivylegend/restockos
+What would you automate?
+@NEARProtocol #NEARHackathon

@@ -11,3 +11,4 @@ __pycache__/
 *.sqlite*
 contracts/*/build/
 .vercel/
+.local/

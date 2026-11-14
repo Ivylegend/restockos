@@ -12,3 +12,5 @@ Before changing RestockOS:
 8. Run the relevant tests and frontend build before reporting success. Distinguish checks that ran from checks blocked by missing credentials, wallet approvals, database services, RPC, or deployment access.
 
 Keep API/service responsibilities, typed Pydantic schemas, SQLAlchemy 2 patterns, and existing Next.js/TanStack Query conventions. Document any new environment variable and avoid adding unnecessary dependencies.
+
+Use the existing `lucide-react` icons for product controls and status visuals. Do not use emoji as interface icons. Preserve accessible text labels for icon-only controls.
