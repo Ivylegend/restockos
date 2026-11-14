@@ -12,3 +12,9 @@ __pycache__/
 contracts/*/build/
 .vercel/
 .local/
+/docs/media/
+/videos/*.mp4
+/videos/*.webm
+/videos/*.mov
+/videos/*.aiff
+/videos/*.wav
