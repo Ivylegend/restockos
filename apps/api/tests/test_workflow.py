@@ -1,3 +1,6 @@
+import base64
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
@@ -206,3 +209,28 @@ def test_workspace_records_are_isolated_for_wallet_owners(workspace):
     assert len(client.get("/agent/runs", headers=bob_headers).json()) == 1
     assert client.post(f"/purchase-orders/{order_id}/receive", headers=alice_headers).status_code == 409
     assert client.post(f"/purchase-orders/{order_id}/receive", headers=bob_headers).status_code == 200
+
+
+def test_transaction_verification_binds_failed_hash_to_exact_purchase(monkeypatch):
+    args = {"order_id": "order-1", "supplier": "northstar.testnet", "amount": "100"}
+    action = {"FunctionCall": {"method_name": "execute_purchase",
+                                "args": base64.b64encode(json.dumps(args).encode()).decode()}}
+    response = {"final_execution_status": "FINAL", "transaction": {
+        "hash": "tx-1", "signer_id": "buyer.testnet", "receiver_id": "policy.buyer.testnet",
+        "actions": [action]}, "status": {"Failure": {"error": "SUPPLIER_NOT_ALLOWED"}},
+        "receipts_outcome": [{"id": "receipt-1", "outcome": {
+            "executor_id": "policy.buyer.testnet", "status": {"Failure": {}}}}]}
+    monkeypatch.setattr(chain, "require_testnet", lambda: None)
+    monkeypatch.setattr(chain, "rpc", lambda *_args: response)
+    result = chain.verify("tx-1", "buyer.testnet", "policy.buyer.testnet", "order-1",
+                          "northstar.testnet", "100")
+    assert result[0:2] == ("rejected", "receipt-1")
+    assert "allowlist" in result[2]
+
+    wrong = json.loads(json.dumps(response))
+    wrong["transaction"]["actions"][0]["FunctionCall"]["args"] = base64.b64encode(
+        json.dumps({**args, "amount": "100000"}).encode()).decode()
+    monkeypatch.setattr(chain, "rpc", lambda *_args: wrong)
+    with pytest.raises(chain.ChainError, match="do not match"):
+        chain.verify("tx-1", "buyer.testnet", "policy.buyer.testnet", "order-1",
+                     "northstar.testnet", "100")
