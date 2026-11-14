@@ -1,8 +1,8 @@
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .db import engine, settings
-from .models import AgentPolicy, Product, Supplier
+from .models import AgentPolicy, Product, Supplier, Workspace
 
 NEAR = 10**24
 CATALOG = [
@@ -25,8 +25,12 @@ CATALOG = [
 ]
 
 
-def seed(db: Session):
-    if db.scalar(select(AgentPolicy.id).where(AgentPolicy.id == 1)):
+def seed(db: Session, workspace_id: str = "admin-demo", owner_account: str = "admin-demo.testnet",
+         name: str = "Northline Electronics"):
+    if db.get(Workspace, workspace_id) is None:
+        db.add(Workspace(id=workspace_id, name=name, owner_account=owner_account))
+        db.flush()
+    if db.scalar(select(AgentPolicy.id).where(AgentPolicy.workspace_id == workspace_id)):
         return
     accounts = settings.demo_supplier_accounts.split(",") if settings.demo_supplier_accounts else [
         "restock-northstar.testnet", "restock-circuit.testnet", "restock-volt.testnet",
@@ -37,11 +41,13 @@ def seed(db: Session):
         [("Northstar Supply", 2, 98, 10000), ("Circuit Wholesale", 5, 94, 8800),
          ("Volt Distribution", 1, 91, 11700)], accounts,
     ):
-        db.add(Supplier(name=name, account=account, lead_days=lead, reliability=reliability, price_bps=price))
+        db.add(Supplier(workspace_id=workspace_id, name=name, account=account, lead_days=lead,
+                        reliability=reliability, price_bps=price))
     for sku, name, category, stock, threshold, sales, price in CATALOG:
-        db.add(Product(sku=sku, name=name, category=category, stock=stock, reorder_point=threshold,
+        db.add(Product(workspace_id=workspace_id, sku=sku, name=name, category=category, stock=stock, reorder_point=threshold,
                        daily_sales=sales, unit_price=str(price * NEAR // 1000)))
-    db.add(AgentPolicy(id=1, paused=False, auto_execute=False, approved_accounts=accounts,
+    policy_id = int(db.connection().execute(select(func.max(AgentPolicy.id))).scalar() or 0) + 1
+    db.add(AgentPolicy(id=policy_id, workspace_id=workspace_id, paused=False, auto_execute=False, approved_accounts=accounts,
                        max_order=str(NEAR // 2), budget=str(2 * NEAR)))
 
 

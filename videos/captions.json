@@ -1,0 +1,11 @@
+[
+  {"start": 0, "end": 9, "text": "RestockOS automates compliant buying for independent retailers."},
+  {"start": 9, "end": 20, "text": "One workspace. 16 products. Three low-stock alerts."},
+  {"start": 20, "end": 31, "text": "USB-C chargers are at 3 units; reorder begins at 20."},
+  {"start": 31, "end": 44, "text": "The agent checks stock, then gathers three supplier quotes."},
+  {"start": 44, "end": 57, "text": "Offers are ranked by price, delivery and reliability."},
+  {"start": 57, "end": 68, "text": "Negotiation stays inside owner limits and supplier allowlists."},
+  {"start": 68, "end": 79, "text": "Public sandbox orders are always marked simulated."},
+  {"start": 79, "end": 92, "text": "Live purchase? The owner confirms in a NEAR Testnet wallet."},
+  {"start": 92, "end": 103, "text": "Final RPC receipts verify payment. The contract rejects redirects."}
+]

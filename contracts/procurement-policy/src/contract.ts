@@ -24,7 +24,7 @@ class ProcurementPolicy {
     agent: string; suppliers: string[]; max_order: string; budget: string; paused: boolean;
   }) {
     this.requireOwner();
-    if (!account(agent) || agent === this.policy.owner || agent === near.currentAccountId() ||
+    if (!account(agent) || agent === near.currentAccountId() ||
         !Array.isArray(suppliers) || suppliers.length > 50 ||
         suppliers.some(supplier => !account(supplier) || supplier === near.currentAccountId()) ||
         typeof paused !== 'boolean') throw new Error('INVALID_POLICY');

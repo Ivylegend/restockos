@@ -1,0 +1,15 @@
+RestockOS helps independent retailers prevent stockouts with controlled, autonomous procurement.
+
+This Northline Electronics workspace tracks sixteen products. The dashboard highlights three items below their reorder points, while the inventory view shows real stock and daily sales estimates.
+
+The USB-C charger is down to three units against a reorder point of twenty. The agent checks coverage, requests three supplier quotes, compares price, delivery and reliability, then negotiates inside the business policy.
+
+The supplier table shows each offer and the selected compliant account. Spending limits and the supplier allowlist are enforced by the policy contract, not by the language model.
+
+Visitors can run the public sandbox to follow the workflow. Those orders are clearly marked simulated and never move NEAR.
+
+For a live Testnet purchase, the workspace owner connects a NEAR wallet, funds their own treasury and confirms the order in the wallet. RestockOS verifies the final transaction and contract receipt before showing a success status.
+
+The recorded rejection shows what happens when a supplier tries to redirect payment: the contract rejects it and treasury funds remain protected.
+
+RestockOS: a practical procurement agent, with clear workspace ownership and financial policy at every step.

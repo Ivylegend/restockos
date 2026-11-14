@@ -25,6 +25,9 @@ services:
       PORT: "8000"
       DATABASE_URL: postgresql+psycopg://restockos:${POSTGRES_PASSWORD}@db:5432/restockos
       OWNER_TOKEN: ${OWNER_TOKEN:?Set OWNER_TOKEN in Dokploy}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      ADMIN_ACCOUNT_IDS: ${ADMIN_ACCOUNT_IDS:-[]}
+      AUTH_RECIPIENT: ${AUTH_RECIPIENT:-restockos-restockos-stack-ogkaac-a88c69-194-31-150-55.sslip.io}
       DEMO_ENABLED: "true"
       PUBLIC_DEMO: "true"
       NEAR_RPC_URL: ${NEAR_RPC_URL:-https://rpc.testnet.near.org}

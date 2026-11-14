@@ -12,5 +12,6 @@ COPY apps/api/requirements.txt /app/apps/api/requirements.txt
 RUN pip install --no-cache-dir -r /app/apps/api/requirements.txt
 COPY apps/api /app/apps/api
 COPY scripts/sign-purchase.mjs /app/scripts/sign-purchase.mjs
+COPY scripts/verify-nep413.mjs /app/scripts/verify-nep413.mjs
 WORKDIR /app/apps/api
 CMD ["sh", "-c", "alembic upgrade head && python -m restock.seed && exec uvicorn restock.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

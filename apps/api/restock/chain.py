@@ -38,10 +38,20 @@ def rpc(method: str, params: dict):
         raise ChainError("NEAR RPC is unavailable.") from exc
 
 
+def require_testnet():
+    status = rpc("status", [])
+    if status.get("chain_id") != "testnet":
+        raise ChainError("RestockOS only supports NEAR Testnet transactions.")
+
+
 def view(method: str, args: dict, contract: str | None = None):
+    contract = contract or settings.near_contract_id
+    if contract and not contract.endswith(".testnet"):
+        raise ChainError("RestockOS only supports NEAR Testnet contracts.")
+    require_testnet()
     result = rpc("query", {
         "request_type": "call_function", "finality": "final",
-        "account_id": contract or settings.near_contract_id, "method_name": method,
+        "account_id": contract, "method_name": method,
         "args_base64": base64.b64encode(json.dumps(args).encode()).decode(),
     })
     return json.loads(bytes(result["result"]))
@@ -69,12 +79,28 @@ def broadcast(payload: str):
 
 
 def verify(tx_hash: str, signer: str, contract: str, order_id: str, account: str, amount: str):
+    if not signer.endswith(".testnet") or not contract.endswith(".testnet"):
+        raise ChainError("RestockOS only supports NEAR Testnet transactions.")
+    require_testnet()
     result = rpc("tx", {"tx_hash": tx_hash, "sender_account_id": signer, "wait_until": "FINAL"})
     if result.get("final_execution_status") != "FINAL":
         return None
     tx = result.get("transaction", {})
     if (tx.get("hash"), tx.get("signer_id"), tx.get("receiver_id")) != (tx_hash, signer, contract):
         raise ChainError("RPC returned an unrelated transaction.")
+    # A caller-supplied hash must refer to this exact purchase call even when
+    # execution failed. Otherwise an unrelated failed transaction could mark
+    # a purchase order as rejected in the application.
+    actions = tx.get("actions", [])
+    calls = [action.get("FunctionCall") for action in actions if action.get("FunctionCall")]
+    if len(actions) != 1 or len(calls) != 1 or calls[0].get("method_name") != "execute_purchase":
+        raise ChainError("Transaction does not contain the expected purchase call.")
+    try:
+        call_args = json.loads(base64.b64decode(calls[0]["args"], validate=True))
+    except (KeyError, ValueError, json.JSONDecodeError) as exc:
+        raise ChainError("Purchase transaction arguments could not be verified.") from exc
+    if call_args != {"order_id": order_id, "supplier": account, "amount": amount}:
+        raise ChainError("Transaction purchase details do not match the order.")
     status = result.get("status", {})
     if "Failure" in status:
         details = json.dumps(status["Failure"])

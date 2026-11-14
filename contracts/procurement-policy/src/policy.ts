@@ -18,7 +18,7 @@ export function account(value: string): boolean {
 }
 
 export function reserve(policy: Policy, caller: string, purchase: Purchase, exists: boolean): void {
-  if (caller !== policy.agent) throw new Error('UNAUTHORIZED_AGENT');
+  if (caller !== policy.agent && caller !== policy.owner) throw new Error('UNAUTHORIZED_AGENT');
   if (policy.paused) throw new Error('AGENT_PAUSED');
   if (exists) throw new Error('ORDER_ALREADY_USED');
   if (!policy.suppliers.includes(purchase.supplier)) throw new Error('SUPPLIER_NOT_ALLOWED');

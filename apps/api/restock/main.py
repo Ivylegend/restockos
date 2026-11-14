@@ -1,21 +1,31 @@
 import asyncio
 import time
-import secrets
+import subprocess
+import json
+import os
+import re
+from threading import Lock
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from contextlib import asynccontextmanager, suppress
 from typing import Annotated
+from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from . import chain, procurement
+from .auth import DEMO_WORKSPACE, Principal, create_session, nonce, require_principal
 from .db import engine, logger, session, settings
 from .models import (AgentPolicy, AgentRun, AuditEvent, BlockchainTransaction, InventoryMovement,
-                     Product, PurchaseOrder, PurchaseOrderItem, Supplier, SupplierQuote)
-from .schemas import PolicyInput, ProductInput, RunInput, StockUpdate
-from .seed import CATALOG
+                     AuthChallenge, Product, PurchaseOrder, PurchaseOrderItem, Supplier,
+                     SupplierQuote, Workspace)
+from .schemas import (PolicyInput, ProductInput, RunInput, StockUpdate, TransactionVerifyInput,
+                      WalletVerifyInput, WorkspaceContractInput)
+from .seed import CATALOG, seed as seed_workspace
 
 
 def maintain_payments(scan: bool):
@@ -54,32 +64,120 @@ app = FastAPI(title="RestockOS API", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=[settings.web_origin], allow_methods=["GET", "POST", "PUT", "PATCH"],
                    allow_headers=["Authorization", "Content-Type"])
 DB = Annotated[Session, Depends(session)]
+RATE_LIMITS: dict[str, list[float]] = {}
+RATE_LIMIT_LOCK = Lock()
 
 
-def authorized(authorization: str | None, *tokens: str):
-    supplied = (authorization or "").removeprefix("Bearer ").encode()
-    if not authorization or not authorization.startswith("Bearer ") or not any(
-        token and secrets.compare_digest(supplied, token.encode()) for token in tokens
-    ):
-        raise HTTPException(401, "A valid workspace access token is required.")
+def rate_limit(request: Request, bucket: str, limit: int, period: int = 60):
+    with RATE_LIMIT_LOCK:
+        now = time.monotonic()
+        ip = request.client.host if request.client else "unknown"
+        key = f"{bucket}:{ip}"
+        hits = [stamp for stamp in RATE_LIMITS.get(key, []) if now - stamp < period]
+        if len(hits) >= limit:
+            RATE_LIMITS[key] = hits
+            raise HTTPException(429, "Too many requests. Please wait and try again.")
+        hits.append(now)
+        RATE_LIMITS[key] = hits
+        if len(RATE_LIMITS) > 5000:
+            for stale in [key for key, stamps in RATE_LIMITS.items() if not stamps or now - stamps[-1] >= period]:
+                RATE_LIMITS.pop(stale, None)
 
 
-def owner(authorization: Annotated[str | None, Header()] = None):
-    authorized(authorization, settings.owner_token)
+def bind_principal(db: Session, principal: Principal):
+    db.info["workspace_id"] = principal.workspace_id
+    return principal
 
 
-def viewer(authorization: Annotated[str | None, Header()] = None):
-    if not (settings.demo_enabled and settings.public_demo):
-        owner(authorization)
+def owner(db: DB, authorization: Annotated[str | None, Header()] = None):
+    principal = require_principal(authorization, settings)
+    if principal.role not in ("owner", "admin"):
+        raise HTTPException(403, "Owner authorization is required.")
+    return bind_principal(db, principal)
+
+
+def viewer(db: DB, authorization: Annotated[str | None, Header()] = None):
+    return bind_principal(db, require_principal(authorization, settings, public=True))
 
 
 @app.get("/demo/access")
 def demo_access():
-    return {"public_read_only": settings.demo_enabled and settings.public_demo}
+    public_access = settings.demo_enabled and settings.public_demo
+    return {"public_access": public_access, "public_read_only": public_access,
+            "sandbox_enabled": public_access}
 
 
-def operator(authorization: Annotated[str | None, Header()] = None):
-    authorized(authorization, settings.owner_token, settings.automation_token)
+@app.get("/auth/challenge")
+def auth_challenge(account_id: str, request: Request, db: DB):
+    rate_limit(request, "auth-challenge", 8)
+    if not settings.demo_enabled:
+        raise HTTPException(403, "Wallet workspace creation is disabled.")
+    if not account_id or len(account_id) > 64 or not re.fullmatch(r"(?:[a-z0-9]+[-_.])*[a-z0-9]+", account_id):
+        raise HTTPException(422, "Enter a valid NEAR Testnet account ID.")
+    now = datetime.now(timezone.utc)
+    db.execute(delete(AuthChallenge).where(AuthChallenge.expires_at < now))
+    value = nonce()
+    message = f"Sign in to RestockOS. One-time nonce: {value}"
+    db.add(AuthChallenge(nonce=value, account_id=account_id, message=message,
+                         expires_at=now + timedelta(minutes=5)))
+    db.commit()
+    return {"nonce": value, "message": message, "recipient": settings.auth_recipient}
+
+
+@app.post("/auth/verify")
+def auth_verify(payload: WalletVerifyInput, request: Request, db: DB):
+    rate_limit(request, "auth-verify", 8)
+    challenge = db.scalar(select(AuthChallenge).where(AuthChallenge.nonce == payload.nonce).with_for_update())
+    if not challenge or challenge.account_id != payload.account_id or challenge.consumed_at:
+        raise HTTPException(401, "Wallet sign-in challenge is invalid or already used.")
+    expiry = challenge.expires_at
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    if expiry <= datetime.now(timezone.utc):
+        raise HTTPException(401, "Wallet sign-in challenge expired. Connect again.")
+    args = json.dumps({"rpc": settings.near_rpc_url, "account_id": payload.account_id,
+                       "public_key": payload.public_key, "signature": payload.signature,
+                       "message": challenge.message, "nonce": payload.nonce,
+                       "recipient": settings.auth_recipient})
+    verifier = Path(__file__).resolve().parents[3] / "scripts" / "verify-nep413.mjs"
+    try:
+        checked = subprocess.run(["node", str(verifier), args], capture_output=True, text=True,
+                                 timeout=15, env=os.environ.copy())
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise HTTPException(503, "Wallet signature verification is unavailable.") from exc
+    if checked.returncode:
+        raise HTTPException(401, "NEAR Testnet could not verify this wallet signature.")
+    challenge.consumed_at = datetime.now(timezone.utc)
+    admin_accounts = set(settings.admin_account_ids)
+    if payload.account_id in admin_accounts:
+        workspace_id, role = DEMO_WORKSPACE, "admin"
+        workspace = db.get(Workspace, workspace_id)
+    else:
+        workspace = db.scalar(select(Workspace).where(Workspace.owner_account == payload.account_id))
+        if workspace is None:
+            workspace_id = "ws-" + uuid4().hex
+            label = payload.account_id.split(".", 1)[0].replace("-", " ").title()
+            workspace = Workspace(id=workspace_id, name=(label[:100] + " Workspace"), owner_account=payload.account_id)
+            db.add(workspace)
+            db.flush()
+            role = "owner"
+            db.info["workspace_id"] = workspace_id
+            seed_workspace(db, workspace_id, payload.account_id, workspace.name)
+        else:
+            workspace_id, role = workspace.id, "owner"
+    db.commit()
+    token = create_session(settings, workspace_id, payload.account_id, role)
+    return {"access_token": token, "token_type": "bearer", "role": role,
+            "workspace": {"id": workspace_id, "name": workspace.name if workspace else "Admin workspace",
+                          "owner_account": workspace.owner_account if workspace else payload.account_id,
+                          "contract_id": workspace.contract_id if workspace else settings.near_contract_id}}
+
+
+def operator(db: DB, authorization: Annotated[str | None, Header()] = None):
+    principal = require_principal(authorization, settings)
+    if principal.role not in ("owner", "admin", "automation"):
+        raise HTTPException(403, "Agent execution is not authorized.")
+    return bind_principal(db, principal)
 
 
 def row(obj, *, omit=()):
@@ -178,7 +276,7 @@ def orders(db: DB):
 
 @app.get("/agent/policy", dependencies=[Depends(owner)])
 def get_policy(db: DB):
-    policy = db.get(AgentPolicy, 1)
+    policy = db.scalar(select(AgentPolicy).where(AgentPolicy.workspace_id == db.info.get("workspace_id", DEMO_WORKSPACE)))
     if not policy:
         raise HTTPException(503, "Seed the workspace before using the agent.")
     return row(policy, omit=("id",))
@@ -186,7 +284,7 @@ def get_policy(db: DB):
 
 @app.put("/agent/policy", dependencies=[Depends(owner)])
 def put_policy(payload: PolicyInput, db: DB):
-    policy = procurement.lock_policy(db)
+    policy = procurement.lock_policy(db, db.info.get("workspace_id"))
     accounts = set(db.scalars(select(Supplier.account)))
     if not set(payload.approved_accounts) <= accounts:
         raise HTTPException(422, "Select suppliers from the workspace directory.")
@@ -197,14 +295,30 @@ def put_policy(payload: PolicyInput, db: DB):
     return row(policy, omit=("id",))
 
 
-@app.post("/agent/run", dependencies=[Depends(operator)])
-def run_agent(db: DB, payload: RunInput = RunInput(), authorization: Annotated[str | None, Header()] = None):
+@app.post("/agent/run")
+def run_agent(db: DB, request: Request, payload: RunInput = RunInput(),
+              principal: Principal = Depends(operator)):
+    rate_limit(request, "agent-run", 10)
     if payload.scenario == "redirect":
-        owner(authorization)
+        if principal.role != "admin":
+            raise HTTPException(403, "Only the admin may run the controlled rejection scenario.")
         if not settings.demo_enabled:
             raise HTTPException(403, "The controlled rejection demo is disabled.")
-    run, order = procurement.run_agent(db, payload.scenario)
+    run, order = procurement.run_agent(db, payload.scenario,
+                                       allow_server_signing=principal.role in ("admin", "automation"))
     return {**row(run), "order": row(order) if order else None}
+
+
+@app.post("/demo/run")
+def run_sandbox(db: DB, request: Request):
+    if not (settings.demo_enabled and settings.public_demo):
+        raise HTTPException(403, "The public sandbox is disabled.")
+    rate_limit(request, "sandbox-run", 5)
+    db.info["workspace_id"] = DEMO_WORKSPACE
+    run, order = procurement.run_agent(db, "normal", sandbox=True, workspace_id=DEMO_WORKSPACE,
+                                       allow_server_signing=False)
+    return {**row(run), "order": row(order) if order else None,
+            "simulation": True, "notice": "Sandbox only. No wallet was asked to sign and no NEAR transaction was sent."}
 
 
 @app.get("/agent/runs", dependencies=[Depends(viewer)])
@@ -217,8 +331,11 @@ def runs(db: DB):
     return [{**row(run), "events": grouped[run.id]} for run in records]
 
 
-@app.post("/purchase-orders/{order_id}/execute", dependencies=[Depends(owner)])
-def execute(order_id: str, db: DB):
+@app.post("/purchase-orders/{order_id}/execute")
+def execute(order_id: str, db: DB, request: Request, principal: Principal = Depends(owner)):
+    rate_limit(request, "purchase-execute", 10)
+    if principal.role != "admin":
+        raise HTTPException(403, "Workspace owners must confirm purchases in their connected NEAR wallet.")
     return row(procurement.request_onchain_purchase(db, order_id))
 
 
@@ -244,23 +361,120 @@ def transactions(db: DB):
 
 
 @app.get("/treasury", dependencies=[Depends(viewer)])
-def treasury():
-    if not settings.near_contract_id:
+def treasury(db: DB):
+    workspace = db.get(Workspace, db.info.get("workspace_id", DEMO_WORKSPACE))
+    contract_id = workspace.contract_id if workspace else None
+    if db.info.get("workspace_id") == DEMO_WORKSPACE:
+        contract_id = contract_id or settings.near_contract_id
+    if not contract_id:
         return {"contract": None, "policy": None, "error": "Set a NEAR Testnet contract to connect treasury."}
     try:
-        policy = chain.view("get_policy", {})
-        return {"contract": settings.near_contract_id, "policy": policy, "error": None}
+        policy = chain.view("get_policy", {}, contract_id)
+        return {"contract": contract_id, "policy": policy, "error": None}
     except chain.ChainError as exc:
-        return {"contract": settings.near_contract_id, "policy": None, "error": str(exc)}
+        return {"contract": contract_id, "policy": None, "error": str(exc)}
 
 
 @app.get("/workspace", dependencies=[Depends(owner)])
-def workspace():
-    return {"demo_enabled": settings.demo_enabled, "chain_configured": bool(settings.near_contract_id)}
+def workspace(db: DB, principal: Principal = Depends(owner)):
+    record = db.get(Workspace, db.info.get("workspace_id", DEMO_WORKSPACE))
+    contract = record.contract_id if record else None
+    if db.info.get("workspace_id") == DEMO_WORKSPACE:
+        contract = contract or settings.near_contract_id
+    owner_account = record.owner_account if record else None
+    return {"id": record.id if record else DEMO_WORKSPACE,
+            "name": record.name if record else "Admin workspace",
+            "owner_account": owner_account,
+            "contract_id": contract,
+            "expected_contract_id": ("policy." + owner_account) if owner_account else None,
+            "role": principal.role,
+            "demo_enabled": settings.demo_enabled, "chain_configured": bool(contract)}
 
 
-@app.post("/demo/reset", status_code=204, dependencies=[Depends(owner)])
-def reset(db: DB):
+@app.put("/workspace/contract")
+def set_workspace_contract(payload: WorkspaceContractInput, db: DB,
+                           principal: Principal = Depends(owner)):
+    workspace = db.get(Workspace, principal.workspace_id)
+    if not workspace or not principal.account_id or workspace.owner_account != principal.account_id:
+        raise HTTPException(403, "The connected wallet must own this workspace.")
+    expected = "policy." + workspace.owner_account
+    if payload.contract_id != expected:
+        raise HTTPException(422, f"This workspace contract must be deployed at {expected}.")
+    try:
+        policy = chain.view("get_policy", {}, payload.contract_id)
+    except chain.ChainError as exc:
+        raise HTTPException(422, "The Testnet contract is not deployed or could not be verified.") from exc
+    if policy.get("owner") != workspace.owner_account:
+        raise HTTPException(422, "The contract owner does not match the workspace wallet.")
+    workspace.contract_id = payload.contract_id
+    db.commit()
+    return {"contract_id": workspace.contract_id, "owner": policy["owner"]}
+
+
+@app.post("/purchase-orders/{order_id}/authorize")
+def authorize_wallet_purchase(order_id: str, db: DB, principal: Principal = Depends(owner)):
+    workspace = db.get(Workspace, principal.workspace_id)
+    order = db.get(PurchaseOrder, order_id, with_for_update=True)
+    if not workspace or not principal.account_id or workspace.owner_account != principal.account_id:
+        raise HTTPException(403, "The connected workspace owner must confirm this payment.")
+    if not workspace.contract_id:
+        raise HTTPException(409, "Deploy and verify this workspace's Testnet policy contract first.")
+    if not order or order.status != "ready":
+        raise HTTPException(409, "Only a ready purchase order can be authorized.")
+    policy = procurement.lock_policy(db, principal.workspace_id)
+    quote = db.scalar(select(SupplierQuote).where(SupplierQuote.run_id == order.run_id,
+                                                  SupplierQuote.account == order.account))
+    if not quote:
+        raise HTTPException(409, "The selected supplier quote could not be verified.")
+    reason = procurement.check_policy(policy, quote, order.amount, "normal")
+    if reason:
+        raise HTTPException(409, reason)
+    return {"network": "testnet", "contract_id": workspace.contract_id,
+            "order_id": order.id, "supplier": order.account, "amount": order.amount,
+            "method_name": "execute_purchase", "args": {"order_id": order.id,
+                "supplier": order.account, "amount": order.amount}}
+
+
+@app.post("/transactions/verify")
+def verify_wallet_transaction(payload: TransactionVerifyInput, db: DB, request: Request,
+                              principal: Principal = Depends(owner)):
+    rate_limit(request, "transaction-verify", 12)
+    workspace = db.get(Workspace, principal.workspace_id)
+    order = db.get(PurchaseOrder, payload.order_id, with_for_update=True)
+    if not workspace or not principal.account_id or workspace.owner_account != principal.account_id:
+        raise HTTPException(403, "The connected wallet does not own this workspace.")
+    if not workspace.contract_id or not order or order.status not in ("ready", "submitting"):
+        raise HTTPException(404, "The pending Testnet purchase was not found.")
+    existing = db.scalar(select(BlockchainTransaction).where(BlockchainTransaction.order_id == order.id))
+    if existing and existing.hash != payload.hash:
+        raise HTTPException(409, "This order already has a different transaction hash.")
+    if existing:
+        tx = existing
+    else:
+        tx = BlockchainTransaction(workspace_id=workspace.id, order_id=order.id, hash=payload.hash,
+                                   signer=principal.account_id, contract=workspace.contract_id,
+                                   signed_payload=None, status="pending")
+        db.add(tx)
+        order.status = "submitting"
+        db.get(AgentRun, order.run_id).status = "submitting"
+    try:
+        outcome = chain.verify(tx.hash, principal.account_id, workspace.contract_id,
+                               order.id, order.account, order.amount)
+    except chain.ChainError as exc:
+        db.commit()
+        raise HTTPException(422, str(exc)) from exc
+    if outcome:
+        tx.status, tx.receipt_id, tx.reason = outcome
+        order.status, order.reason = outcome[0], outcome[2]
+        db.get(AgentRun, order.run_id).status = outcome[0]
+        procurement.audit(db, order.run_id, "settlement", outcome[2])
+    db.commit()
+    return row(tx, omit=("signed_payload",))
+
+
+@app.post("/demo/reset", status_code=204)
+def reset(db: DB, request: Request, principal: Principal = Depends(owner)):
+    rate_limit(request, "demo-reset", 2)
     if not settings.demo_enabled:
         raise HTTPException(403, "Demo reset is disabled.")
     procurement.lock_policy(db)

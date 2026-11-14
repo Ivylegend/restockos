@@ -19,6 +19,14 @@ test('rejects unauthorized, redirected, oversized and replayed payments without 
   assert.deepEqual(config, policy());
 });
 
+test('allows the policy owner to submit a wallet-confirmed purchase', () => {
+  const config = policy();
+  const purchase = order('40');
+  reserve(config, config.owner, purchase, false);
+  assert.equal(config.available, '60');
+  assert.equal(config.reserved, '40');
+});
+
 test('pending transfers count against budget, failures refund, and success settles exactly once', () => {
   const config = policy();
   const purchase = order();

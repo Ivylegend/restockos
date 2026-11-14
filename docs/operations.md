@@ -1,11 +1,25 @@
 # Payment operations
 
-An order progresses from ready to submitting and then to paid, rejected, or failed. Paid orders can be marked received once. Receipt updates and stock movements use a single database transaction.
+## Workspace-owner transactions
 
-The contract checks the authorized predecessor, pause, order ID, supplier account, order limit, budget and available treasury. Pending reservations count toward both budget and liquidity limits. The callback can only be called by the contract itself. A failed transfer releases the reservation and retains the original order ID. An on-chain pause stops new reservations. Previously reserved transfers can finish.
+Tenant purchase orders remain `ready` until the authenticated workspace owner requests an authorization payload and confirms the `execute_purchase` call in their connected NEAR Testnet wallet. The API checks the ready order, owner session, workspace policy, selected quote and contract ID before returning the constrained transaction arguments. The wallet signs directly; RestockOS does not receive a private key.
 
-The API records an outbox-style signed transaction before broadcast. If RPC times out, the worker resends the same signed bytes and queries the same hash. Final settlement requires a matching transaction, contract purchase state and callback receipt. If the signer reports an expired block reference and there is no final transaction or contract record, an operator must reconcile it before issuing a replacement order. Never infer payment failure from an RPC timeout.
+After the wallet returns a transaction hash, the frontend calls `POST /transactions/verify`. The API checks the final transaction signer and receiver, fetches the policy contract purchase state, and waits for the callback receipt before marking an order paid, rejected or failed. Unknown RPC results stay pending. Never infer payment failure from a timeout or report success from a wallet response alone.
 
-The controlled rejection scenario sends a proposed redirected account to the contract address itself, which the contract forbids in the allowlist. The normal workflow excludes flagged quotes. The owner token and demo flag gate the rejection scenario and inventory reset. A rejected attempt can consume Testnet gas from the agent account while treasury balances stay unchanged.
+The user's Testnet contract checks the owner or authorized agent predecessor, pause state, unique order ID, supplier allowlist, per-order cap, total budget and available treasury. Pending reservations count against both budget and liquidity. The private callback can only be called by the contract. Success moves reserved value to spent; transfer failure returns it to available while retaining the used order ID. A pause stops new reservations; an already pending transfer may finish.
 
-Bootstrap files contain disposable Testnet secrets and must stay outside version control. Only the scoped private key belongs in the API environment. The contract owner uses a wallet for policy actions.
+## Preserved admin signer
+
+The original admin workspace keeps the outbox-style server signer. It persists signed transaction bytes before broadcast, rebroadcasts the same bytes after an uncertain RPC response, and verifies the same hash. `scripts/sign-purchase.mjs` confirms the admin key is a restricted function-call key for `execute_purchase` on the configured admin Testnet contract. Signed payloads are omitted from API responses and cleared after settlement. The signer is never used for tenant sessions or sandbox runs.
+
+The controlled rejection scenario is admin-only and intentionally submits an off-allowlist supplier destination to the contract. It may spend Testnet gas. The normal procurement workflow excludes flagged suppliers. A rejected attempt should leave available, reserved and spent contract balances unchanged.
+
+## Sandbox and recovery
+
+Public `/demo/run` creates a `sandbox` run and `simulated` order in the seeded admin demo workspace. It does not invoke chain signing/broadcast and never records a transaction hash. Public run requests are limited to five per minute per source IP per API process.
+
+An admin can use `/demo/reset` to restore seeded inventory and cancel unsigned orders. It preserves transaction history and does not replenish Testnet funds or recycle order IDs. A paid order can be marked received once; stock changes and inventory movement records use the same database transaction.
+
+## Secrets and Testnet
+
+Use Testnet account IDs and RPC only. Keep bootstrap owner credentials separate from the API environment; only the scoped admin function-call secret belongs in the API runtime. Do not place seed phrases, private keys, `OWNER_TOKEN`, `SESSION_SECRET`, or signed payloads in the browser, logs, video, or Git. The app intentionally has no mainnet mode.

@@ -50,19 +50,67 @@ function Shell({ page, token, access, hydrated }: {page:Page; token:string; acce
   const [mobile, setMobile] = useState(false);
   const [unlockError, setUnlockError] = useState('');
   const [notice, setNotice] = useState('');
+  const [account, setAccount] = useState('');
+  const [connection, setConnection] = useState<import('@hot-labs/near-connect').NearConnector|null>(null);
+  const [walletBusy, setWalletBusy] = useState(false);
+  const [walletError, setWalletError] = useState('');
   const client = useQueryClient();
-  const demoAccess = useQuery({queryKey:['demo-access'],queryFn:()=>request<{public_read_only:boolean}>('','/demo/access'),enabled:hydrated});
-  const guest = !token && demoAccess.data?.public_read_only === true;
+  useEffect(() => { setAccount(sessionStorage.getItem('restock-wallet-account') || ''); }, []);
+  const demoAccess = useQuery({queryKey:['demo-access'],queryFn:()=>request<{public_access:boolean;sandbox_enabled:boolean}>('','/demo/access'),enabled:hydrated});
+  const guest = !token && demoAccess.data?.public_access === true;
+  const sandboxEnabled = !!demoAccess.data?.sandbox_enabled;
   const overview = useQuery({queryKey:['summary'], queryFn:()=>request<Summary>(token,'/dashboard/summary'), enabled:(!!token || guest) && page==='overview', refetchInterval:6000});
   const policy = useQuery({queryKey:['policy'], queryFn:()=>request<Policy>(token,'/agent/policy'), enabled:!!token});
-  const workspace = useQuery({queryKey:['workspace'], queryFn:()=>request<{demo_enabled:boolean}>(token,'/workspace'), enabled:!!token});
+  const workspace = useQuery({queryKey:['workspace'], queryFn:()=>request<{id:string;name:string;owner_account:string|null;contract_id:string|null;expected_contract_id:string|null;role:string;demo_enabled:boolean}>(token,'/workspace'), enabled:!!token});
   const run = useMutation({
     mutationFn:(scenario:string)=>request<Run & {order:Order|null}>(token,'/agent/run','POST',{scenario}),
     onSuccess:(data)=>{ setNotice(data.order?.reason || (data.order ? 'Run complete. Follow the order in Purchase orders.' : data.status==='clear' ? 'No shortage without an open order.' : 'Run recorded. See agent activity.')); client.invalidateQueries(); },
     onError:(err)=>setNotice(err.message),
   });
+  const sandboxRun = useMutation({
+    mutationFn:()=>request<Run & {order:Order|null;simulation:boolean;notice:string}>('', '/demo/run', 'POST', {}),
+    onSuccess:(data)=>{ setNotice(data.notice); client.invalidateQueries(); },
+    onError:(err)=>setNotice(err.message),
+  });
   const current = pages[page];
   const showUnlock = !token && (page==='settings' || !guest);
+  async function connectWallet() {
+    setWalletBusy(true); setWalletError('');
+    try {
+      const {NearConnector}=await import('@hot-labs/near-connect');
+      let connector=connection;
+      if (!connector) {
+        connector=new NearConnector({network:'testnet',features:{testnet:true}});
+        connector.on('wallet:signIn', event=>{
+          const id=event.accounts[0]?.accountId || '';
+          if (id) { setAccount(id); sessionStorage.setItem('restock-wallet-account',id); }
+        });
+        connector.on('wallet:signOut',()=>{setAccount('');sessionStorage.removeItem('restock-wallet-account');access('');});
+        setConnection(connector);
+      }
+      const restored=await connector.getConnectedWallet().catch(()=>null);
+      if (!restored?.accounts[0]) await connector.connect();
+      const wallet=await connector.wallet();
+      const connected=(await wallet.getAccounts())[0]?.accountId;
+      if (!connected) throw new Error('The wallet did not return a Testnet account.');
+      setAccount(connected); sessionStorage.setItem('restock-wallet-account',connected);
+      const challenge=await request<{nonce:string;message:string;recipient:string}>('',
+        '/auth/challenge?account_id='+encodeURIComponent(connected));
+      const nonceBytes=Uint8Array.from(atob(challenge.nonce.replace(/-/g,'+').replace(/_/g,'/')),c=>c.charCodeAt(0));
+      const signed=await wallet.signMessage({message:challenge.message,recipient:challenge.recipient,nonce:nonceBytes,network:'testnet',signerId:connected});
+      const auth=await request<{access_token:string;workspace:{name:string};role:string}>('', '/auth/verify', 'POST', {
+        account_id:signed.accountId,public_key:signed.publicKey,signature:signed.signature,nonce:challenge.nonce,
+      });
+      access(auth.access_token);
+      setNotice(auth.role==='admin'?'Admin wallet connected. Existing admin access is preserved.':auth.workspace.name+' workspace ready.');
+    } catch (error) { setWalletError((error as Error).message); }
+    finally { setWalletBusy(false); }
+  }
+  async function disconnectWallet() {
+    try { await connection?.disconnect(); }
+    catch (error) { setWalletError((error as Error).message); }
+    setAccount(''); sessionStorage.removeItem('restock-wallet-account'); access('');
+  }
   async function unlock(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const value = String(new FormData(event.currentTarget).get('token') || '').trim();
@@ -73,28 +121,31 @@ function Shell({ page, token, access, hydrated }: {page:Page; token:string; acce
   return <div className="app-shell">
     <aside className={mobile ? 'sidebar sidebar-open' : 'sidebar'}>
       <Link className="brand" href="/" onClick={()=>setMobile(false)}><span className="brand-icon"><Boxes size={24}/></span><span>Restock<span className="brand-accent">OS</span><small>PROCUREMENT WORKSPACE</small></span></Link>
-      <div className="store"><div className="store-icon"><Warehouse size={17}/></div><div><strong>Northline Electronics</strong><small>Retail workspace</small></div></div>
+      <div className="store"><div className="store-icon"><Warehouse size={17}/></div><div><strong>{workspace.data?.name || 'Northline Electronics'}</strong><small>{workspace.data?.name?'Business workspace':'Seeded sandbox'}</small></div></div>
       <span className="nav-label">WORKSPACE</span>
       <nav>{(Object.entries(pages) as [Page, typeof current][]).map(([id,item])=><Link key={id} href={item.path} aria-current={page===id?'page':undefined} className={page===id?'nav-active':''} onClick={()=>setMobile(false)}><item.icon size={17}/>{item.label}{page===id && <span className="nav-dot"/>}</Link>)}</nav>
       <div className="side-bottom"><div className="side-network"><ShieldCheck size={18}/><div><strong>NEAR Testnet</strong><small>Policy-enforced payments</small></div></div>{token && <Button variant="ghost" onClick={()=>access('')}>Lock workspace</Button>}</div>
     </aside>
     {mobile && <button className="scrim" aria-label="Close navigation" onClick={()=>setMobile(false)}/>}
     <div className="main-frame">
-      <header className="topbar"><div className="breadcrumb"><button className="mobile-menu" aria-label="Open navigation" onClick={()=>setMobile(true)}><Menu size={22}/></button><span>Workspace</span><span>/</span><strong>{current.label}</strong></div><div className="header-right">{guest && <Badge>Read-only demo</Badge>}<Badge variant="info"><span className="dot"/>Testnet</Badge><span className="avatar" aria-label="Workspace owner">NL</span></div></header>
+      <header className="topbar"><div className="breadcrumb"><button className="mobile-menu" aria-label="Open navigation" onClick={()=>setMobile(true)}><Menu size={22}/></button><span>Workspace</span><span>/</span><strong>{current.label}</strong></div><div className="header-right">{guest && <Badge>Public sandbox</Badge>}<Badge variant="info"><span className="dot"/>Testnet</Badge>{account&&<span className="account wallet-account">{account}</span>}<Button variant="outline" disabled={walletBusy} onClick={()=>void(account&&connection?disconnectWallet():connectWallet())}><Wallet size={15}/>{walletBusy?'Connecting…':account&&connection?'Disconnect wallet':'Connect NEAR Wallet'}</Button></div></header>
       <main>
+        {page==='overview' && <LandingIntro guest={guest} sandboxEnabled={sandboxEnabled} busy={sandboxRun.isPending} run={()=>sandboxRun.mutate()} connect={()=>void connectWallet()}/>}
         <div className="page-heading"><div><div className="eyebrow"><span className="dot"/>{page==='overview'?'OPERATIONS CENTER':'NORTHLINE ELECTRONICS'}</div><h1>{current.title}</h1><p>{current.description}</p></div>
-          {token && (page==='overview'||page==='agent') && <Button onClick={()=>run.mutate('normal')} disabled={run.isPending || policy.data?.paused}><Play size={16}/>{run.isPending?'Running procurement…':'Run procurement'}</Button>}
+          {(token && (page==='overview'||page==='agent')) && <Button onClick={()=>run.mutate('normal')} disabled={run.isPending || policy.data?.paused}><Play size={16}/>{run.isPending?'Running procurement…':'Run procurement'}</Button>}
+          {guest && page==='agent' && sandboxEnabled && <Button onClick={()=>sandboxRun.mutate()} disabled={sandboxRun.isPending}><Play size={16}/>{sandboxRun.isPending?'Running sandbox…':'Run sandbox procurement'}</Button>}
         </div>
         {notice && <div className="notice" role="status"><Activity size={16}/>{notice}<button aria-label="Dismiss message" onClick={()=>setNotice('')}><X size={16}/></button></div>}
+        {walletError && <ErrorState error={walletError}/>}
         {!hydrated || (!token && demoAccess.isPending) ? <Loading/> : showUnlock ? <section className="panel unlock"><div className="feature-icon"><ShieldCheck size={24}/></div><h2>Unlock owner controls</h2><p>Enter the owner token to manage inventory, execute payments, or edit settings.</p><form onSubmit={unlock}><label>Access token<input name="token" type="password" required autoComplete="off" placeholder="Workspace token"/></label><Button>Unlock workspace <ArrowRight size={16}/></Button></form>{unlockError && <ErrorState error={unlockError}/>}</section> :
           <>
             {page==='overview' && <QueryView query={overview}>{data=><Overview data={data} policy={policy.data}/>}</QueryView>}
             {page==='inventory' && <Inventory token={token}/>}
             {page==='suppliers' && <Suppliers token={token}/>}
-            {page==='agent' && <Agent token={token} policy={policy.data} demo={!!token && (workspace.data?.demo_enabled || false)} runDemo={()=>run.mutate('redirect')} busy={run.isPending}/>}
-            {page==='orders' && <Orders token={token}/>}
+            {page==='agent' && <Agent token={token} policy={policy.data} demo={!!token && (workspace.data?.demo_enabled || false)} sandbox={guest && sandboxEnabled} runDemo={()=>run.mutate('redirect')} runSandbox={()=>sandboxRun.mutate()} busy={run.isPending || sandboxRun.isPending}/>}
+            {page==='orders' && <Orders token={token} account={account} connection={connection} workspace={workspace.data} connect={connectWallet}/>}
             {page==='treasury' && <TreasuryPage token={token}/>}
-            {page==='settings' && <SettingsPage token={token} policy={policy.data} demo={workspace.data?.demo_enabled || false}/>}
+            {page==='settings' && <SettingsPage token={token} policy={policy.data} demo={workspace.data?.demo_enabled || false} account={account} connection={connection} connect={connectWallet} disconnect={disconnectWallet}/>}
           </>
         }
         <footer><span>RestockOS</span><span>NEAR Hackathon 2026</span></footer>
@@ -106,6 +157,18 @@ function Shell({ page, token, access, hydrated }: {page:Page; token:string; acce
 function Loading() { return <div className="loading-grid" role="status" aria-label="Loading workspace"><span/><span/><span/></div>; }
 function ErrorState({error, retry}: {error:string; retry?:()=>void}) { return <div className="error" role="alert"><CircleAlert size={18}/><span>{error}</span>{retry && <Button variant="outline" onClick={retry}>Retry</Button>}</div>; }
 function Empty({children}: {children:ReactNode}) { return <div className="empty"><Radar size={23}/><p>{children}</p></div>; }
+function LandingIntro({guest,sandboxEnabled,busy,run,connect}: {guest:boolean;sandboxEnabled:boolean;busy:boolean;run:()=>void;connect:()=>void}) {
+  return <section className="landing-intro">
+    <div className="landing-copy"><div className="eyebrow"><span className="dot"/>AUTONOMOUS PROCUREMENT · NEAR TESTNET</div>
+      <h1>Restock before the shelf runs empty.</h1>
+      <p>RestockOS watches stock, compares three suppliers, negotiates within policy and prepares a purchase order. Try the seeded sandbox, or connect your own Testnet wallet to create a private workspace.</p>
+      <div className="landing-actions">{sandboxEnabled&&<Button onClick={run} disabled={busy}><Play size={16}/>{busy?'Running demo…':'Run interactive sandbox'}</Button>}
+        <Button variant="outline" onClick={connect}><Wallet size={16}/>{guest?'Create Business Workspace':'Connect NEAR Wallet'}</Button></div>
+      <small className="landing-note">Sandbox orders are simulated and never send NEAR. Live Testnet payments always require your wallet confirmation.</small>
+    </div>
+    <div className="landing-art" aria-hidden="true"><div className="orbit orbit-one"/><div className="orbit orbit-two"/><div className="landing-orb"><Boxes size={42}/></div><span className="orbit-tag tag-inventory">Inventory signal</span><span className="orbit-tag tag-quotes">3 supplier quotes</span><span className="orbit-tag tag-policy">Policy checked</span><span className="orbit-tag tag-order">Purchase order</span></div>
+  </section>;
+}
 function QueryView<T>({query, children}: {query:{data:T|undefined; isPending:boolean; error:Error|null; refetch:()=>unknown};children:(data:T)=>ReactNode}) {
   if (query.isPending) return <Loading/>;
   if (query.error || !query.data) return <ErrorState error={query.error?.message || 'Workspace data unavailable.'} retry={()=>{void query.refetch();}}/>;
@@ -119,7 +182,7 @@ function Metric({label, value, help, icon:Icon, tone}: {label:string;value:strin
 }
 function Status({value}: {value:string}) {
   const variant = ['paid','received','success','selected','active'].includes(value)?'good':['rejected','failed','flagged'].includes(value)?'bad':['submitting','pending','paused'].includes(value)?'warn':'neutral';
-  return <Badge variant={variant}>{value === 'submitting' ? 'Awaiting finality' : value.replaceAll('_',' ')}</Badge>;
+  return <Badge variant={variant}>{value === 'submitting' ? 'Awaiting finality' : value === 'simulated' ? 'Simulated' : value.replaceAll('_',' ')}</Badge>;
 }
 function ActivityFeed({events}: {events:Event[]}) {
   return events.length ? <ol className="activity-feed">{events.map(event=><li key={event.id}><span className={'activity-icon '+(event.kind==='settlement'?'green':'blue')}>{event.kind==='settlement'?<ArrowDownLeft size={15}/>:event.kind==='policy'?<ShieldCheck size={15}/>:<Activity size={15}/>}</span><div><strong>{event.kind}</strong><p>{event.message}</p><time>{date(event.created_at)}</time></div></li>)}</ol> : <Empty>Run procurement to see inventory checks, quote decisions, and payments here.</Empty>;
@@ -189,22 +252,35 @@ function Suppliers({token}: {token:string}) {
     }}</QueryView></Panel></div>;
 }
 
-function Agent({token,policy,demo,runDemo,busy}: {token:string;policy?:Policy;demo:boolean;runDemo:()=>void;busy:boolean}) {
+function Agent({token,policy,demo,sandbox,runDemo,runSandbox,busy}: {token:string;policy?:Policy;demo:boolean;sandbox:boolean;runDemo:()=>void;runSandbox:()=>void;busy:boolean}) {
   const query=useQuery({queryKey:['runs'],queryFn:()=>request<Run[]>(token,'/agent/runs'),refetchInterval:5000});
-  return <div className="stack"><section className="panel agent-banner"><span className="feature-icon"><Bot size={24}/></span><div><h2>Autonomous procurement</h2><p>{!token?'Follow the recorded decisions and contract outcomes.':policy?.auto_execute?'Eligible orders are sent to the policy contract automatically.':'The agent prepares orders for owner execution.'}</p></div>{policy && <Status value={policy.paused?'paused':'active'}/>}</section>
+  return <div className="stack"><section className="panel agent-banner"><span className="feature-icon"><Bot size={24}/></span><div><h2>Autonomous procurement</h2><p>{sandbox?'Sandbox runs create simulated quotes and purchase orders without touching the treasury.':!token?'Follow the recorded decisions and verified contract outcomes.':policy?.auto_execute?'Eligible orders are sent to the policy contract automatically.':'The agent prepares orders for owner execution.'}</p></div>{policy && <Status value={policy.paused?'paused':'active'}/>}</section>
+    {sandbox && <Panel title="Interactive sandbox" subtitle="Run the deterministic procurement workflow against seeded inventory. All generated orders are marked simulated." action={<Button onClick={runSandbox} disabled={busy}><Play size={16}/>{busy?'Running…':'Run sandbox procurement'}</Button>}/>}
     {demo && <Panel title="Policy rejection demo" subtitle="Submit a redirected quote to the contract and inspect the rejection." action={<Button variant="outline" onClick={runDemo} disabled={busy || policy?.paused}><ShieldCheck size={16}/>Run rejection demo</Button>}/>}
     <Panel title="Run history" subtitle="Inventory checks, quote selection, and settlement events"><QueryView query={query}>{runs=>runs.length ? <div className="run-list">{runs.map((run,i)=><details key={run.id} open={i===0||undefined}><summary><div><strong>{run.scenario==='redirect'?'Policy rejection demo':'Procurement scan'}</strong><small>{date(run.created_at)} · {run.mode}</small></div><Status value={run.status}/></summary><ActivityFeed events={run.events}/></details>)}</div>:<Empty>No agent runs yet.</Empty>}</QueryView></Panel></div>;
 }
 
-function Orders({token}: {token:string}) {
+function Orders({token,account,connection,workspace,connect}: {token:string;account:string;connection:import('@hot-labs/near-connect').NearConnector|null;workspace?:{role:string;owner_account:string|null;contract_id:string|null};connect:()=>Promise<void>}) {
   const [filter,setFilter]=useState('');
   const client=useQueryClient();
   const query=useQuery({queryKey:['orders'],queryFn:()=>request<Order[]>(token,'/purchase-orders'),refetchInterval:4500});
   const update=useMutation({mutationFn:({id,action}:{id:string;action:string})=>request<Order>(token,'/purchase-orders/'+id+'/'+action,'POST'),onSuccess:()=>client.invalidateQueries()});
-  return <Panel title="Purchase order register" subtitle="Payments and inbound inventory"><div className="table-toolbar"><SearchBox value={filter} onChange={setFilter} placeholder="Search purchase orders"/></div>{update.error && <ErrorState error={update.error.message}/>}
+  const [walletError,setWalletError]=useState('');
+  const walletPay=useMutation({mutationFn:async(order:Order)=>{
+    if (!connection || !account) { await connect(); throw new Error('Wallet connected. Select Confirm with wallet again to authorize this purchase.'); }
+    const approval=await request<{contract_id:string;method_name:string;args:Record<string,string>}>(token,
+      '/purchase-orders/'+order.id+'/authorize','POST',{});
+    const wallet=await connection.wallet();
+    const outcome=await wallet.signAndSendTransaction({network:'testnet',signerId:account,receiverId:approval.contract_id,
+      actions:[{type:'FunctionCall',params:{methodName:approval.method_name,args:approval.args,gas:'70000000000000',deposit:'0'}}]});
+    const hash=(outcome as {transaction?:{hash?:string}}|undefined)?.transaction?.hash;
+    if (!hash) throw new Error('The wallet did not return a transaction hash. Check the wallet activity before retrying.');
+    return request<Transaction>(token,'/transactions/verify','POST',{order_id:order.id,hash});
+  },onSuccess:()=>{setWalletError('');client.invalidateQueries();},onError:error=>setWalletError(error.message)});
+  return <Panel title="Purchase order register" subtitle="Payments and inbound inventory"><div className="table-toolbar"><SearchBox value={filter} onChange={setFilter} placeholder="Search purchase orders"/></div>{update.error && <ErrorState error={update.error.message}/ >}{walletError&&<ErrorState error={walletError}/>}
     <QueryView query={query}>{data=>{
       const rows=data.filter(o=>matches(filter,o.id,o.supplier,o.product,o.status));
-      return rows.length?<div className="table-wrap"><table><thead><tr><th>Order / Product</th><th>Supplier</th><th>Quantity</th><th>Amount</th><th>Status</th><th>Action</th></tr></thead><tbody>{rows.map(o=><tr key={o.id}><td><strong>{o.product}</strong><small>PO-{o.id.slice(0,8).toUpperCase()}</small></td><td>{o.supplier}</td><td>{o.quantity}</td><td>{money(o.amount)}</td><td><Status value={o.status}/>{o.reason&&<small className="order-reason">{o.reason}</small>}</td><td className="order-actions">{token && ['ready','paid'].includes(o.status)&&<Button variant="outline" disabled={update.isPending} onClick={()=>update.mutate({id:o.id,action:o.status==='ready'?'execute':'receive'})}>{o.status==='ready'?'Execute':'Receive stock'}</Button>}{o.hash&&<a className="text-link" href={explorer(o.hash)} target="_blank" rel="noreferrer">Explorer <ArrowUpRight size={13}/></a>}</td></tr>)}</tbody></table></div>:<Empty>No purchase orders match your search.</Empty>;
+      return rows.length?<div className="table-wrap"><table><thead><tr><th>Order / Product</th><th>Supplier</th><th>Quantity</th><th>Amount</th><th>Status</th><th>Action</th></tr></thead><tbody>{rows.map(o=><tr key={o.id}><td><strong>{o.product}</strong><small>PO-{o.id.slice(0,8).toUpperCase()}</small></td><td>{o.supplier}</td><td>{o.quantity}</td><td>{money(o.amount)}</td><td><Status value={o.status}/>{o.reason&&<small className="order-reason">{o.reason}</small>}</td><td className="order-actions">{token && o.status==='ready' && workspace?.role==='admin'&&<Button variant="outline" disabled={update.isPending} onClick={()=>update.mutate({id:o.id,action:'execute'})}>Execute with admin signer</Button>}{token&&o.status==='ready'&&workspace?.role!=='admin'&&<Button variant="outline" disabled={walletPay.isPending || !workspace?.contract_id} onClick={()=>walletPay.mutate(o)}>{walletPay.isPending?'Waiting for wallet…':account===workspace?.owner_account?'Confirm with wallet':workspace?.contract_id?'Connect owner wallet':'Deploy policy first'}</Button>}{token&&o.status==='paid'&&<Button variant="outline" disabled={update.isPending} onClick={()=>update.mutate({id:o.id,action:'receive'})}>Receive stock</Button>}{o.hash&&<a className="text-link" href={explorer(o.hash)} target="_blank" rel="noreferrer">Explorer <ArrowUpRight size={13}/></a>}</td></tr>)}</tbody></table></div>:<Empty>No purchase orders match your search.</Empty>;
     }}</QueryView></Panel>;
 }
 
@@ -219,37 +295,42 @@ function TreasuryPage({token}: {token:string}) {
     }}</QueryView></Panel></div>;
 }
 
-function SettingsPage({token,policy,demo}: {token:string;policy?:Policy;demo:boolean}) {
+function SettingsPage({token,policy,demo,account,connection,connect,disconnect}: {token:string;policy?:Policy;demo:boolean;account:string;connection:import('@hot-labs/near-connect').NearConnector|null;connect:()=>Promise<void>;disconnect:()=>Promise<void>}) {
   const client=useQueryClient();
   const suppliers=useQuery({queryKey:['suppliers'],queryFn:()=>request<Supplier[]>(token,'/suppliers')});
+  const workspace=useQuery({queryKey:['workspace'],queryFn:()=>request<{owner_account:string|null;contract_id:string|null;expected_contract_id:string|null;role:string}>(token,'/workspace')});
   const chain=useQuery({queryKey:['treasury'],queryFn:()=>request<Treasury>(token,'/treasury'),refetchInterval:10000});
-  const [account,setAccount]=useState('');
-  const [connection,setConnection]=useState<import('@hot-labs/near-connect').NearConnector|null>(null);
   const [message,setMessage]=useState('');
   const [walletError,setWalletError]=useState('');
   const [walletPending,setWalletPending]=useState(false);
   const save=useMutation({mutationFn:(value:Policy)=>request<Policy>(token,'/agent/policy','PUT',value),
     onSuccess:()=>{setMessage('Workspace permissions saved.');client.invalidateQueries();}});
   const reset=useMutation({mutationFn:()=>request(token,'/demo/reset','POST'),onSuccess:()=>{setMessage('Demo stock restored. Payment history was preserved.');client.invalidateQueries();}});
-  async function connect() {
-    setWalletError('');
-    try {
-      const {NearConnector}=await import('@hot-labs/near-connect');
-      const connector=connection || new NearConnector({network:'testnet',features:{testnet:true}});
-      if (!connection) {
-        connector.on('wallet:signIn', event=>setAccount(event.accounts[0]?.accountId || ''));
-        connector.on('wallet:signOut',()=>setAccount(''));
-        setConnection(connector);
-      }
-      const signedIn=await connector.getConnectedWallet().catch(()=>null);
-      if (signedIn?.accounts[0]) setAccount(signedIn.accounts[0].accountId);
-      else await connector.connect();
-    } catch (error) { setWalletError((error as Error).message); }
+  async function deployPolicy() {
+    if (!connection || !account || account!==workspace.data?.owner_account || !workspace.data.expected_contract_id || !policy || !suppliers.data) {
+      throw new Error('Connect the workspace owner wallet and load its supplier policy first.');
+    }
+    const response=await fetch('/procurement-policy.wasm');
+    if (!response.ok) throw new Error('The Testnet policy contract build is unavailable.');
+    const wasm=new Uint8Array(await response.arrayBuffer());
+    const {actions}=await import('near-api-js');
+    const wallet=await connection.wallet();
+    const contract=workspace.data.expected_contract_id;
+    await wallet.signAndSendTransaction({network:'testnet',signerId:account,receiverId:contract,actions:[
+      actions.createAccount(),actions.transfer(BigInt(toYocto('0.5'))),
+    ]});
+    await wallet.signAndSendTransaction({network:'testnet',signerId:account,receiverId:contract,actions:[
+      actions.deployContract(wasm),actions.functionCall('init',{owner:account},60_000_000_000_000n,0n),
+    ]});
+    await wallet.signAndSendTransaction({network:'testnet',signerId:account,receiverId:contract,actions:[
+      actions.functionCall('configure_policy',{agent:account,suppliers:policy.approved_accounts,
+        max_order:policy.max_order,budget:policy.budget,paused:policy.paused},60_000_000_000_000n,0n),
+    ]});
+    await request(token,'/workspace/contract','PUT',{contract_id:contract});
+    client.invalidateQueries();
+    setMessage('Workspace policy deployed and verified on NEAR Testnet. Fund its treasury before executing a live order.');
   }
-  async function disconnect() {
-    try { await connection?.disconnect(); setAccount(''); }
-    catch (error) { setWalletError((error as Error).message); }
-  }
+  const deploy=useMutation({mutationFn:deployPolicy,onError:error=>setWalletError(error.message)});
   async function onchain(method:string, fields:FormData) {
     const treasury=chain.data;
     if (!connection || !treasury?.contract || !treasury.policy) return;
@@ -296,8 +377,9 @@ function SettingsPage({token,policy,demo}: {token:string;policy?:Policy;demo:boo
       </form>:<Loading/>}
       {save.error&&<ErrorState error={save.error.message}/>}
     </Panel>
-    <Panel title="NEAR wallet" subtitle="Connect the contract owner account to configure, pause, or fund the treasury." action={<Button variant="outline" onClick={()=>void (account ? disconnect() : connect())}><Wallet size={16}/>{account?'Disconnect wallet':'Connect Testnet wallet'}</Button>}>
+    <Panel title="NEAR wallet" subtitle="Connect a Testnet wallet to configure policy, fund a treasury, and approve live purchases." action={<Button variant="outline" onClick={()=>void (account&&connection ? disconnect() : connect())}><Wallet size={16}/>{account&&connection?'Disconnect wallet':'Connect Testnet wallet'}</Button>}>
       {account && <div className="settings-form"><div className="account">{account}</div>{chainOwner ? <><form className="button-group fund-form" onSubmit={e=>{e.preventDefault();void onchain('fund_treasury',new FormData(e.currentTarget));}}><label>Fund treasury in NEAR<input name="deposit" inputMode="decimal" required/></label><Button disabled={walletPending}>Fund treasury</Button></form><Button variant="outline" disabled={walletPending} onClick={()=>void onchain('pause_agent',new FormData())}>Pause on-chain agent</Button></> : <p className="muted">Connect the account listed as owner on the deployed contract.</p>}</div>}
+      {account&&workspace.data?.owner_account===account&&!workspace.data.contract_id&&<div className="settings-form"><p className="muted">Deploy an isolated policy account owned by this wallet. Testnet account creation uses about 0.5 NEAR plus network fees, and each deployment step is confirmed in your wallet.</p><Button disabled={deploy.isPending||!connection||!policy||!suppliers.data} onClick={()=>deploy.mutate()}>{deploy.isPending?'Waiting for wallet confirmations…':'Deploy workspace policy on Testnet'}</Button></div>}
       {chain.data?.policy&&<div className="settings-form"><div className="account">Contract owner · {chain.data.policy.owner}</div><div className="muted">On-chain cap {money(chain.data.policy.max_order)} · Budget {money(chain.data.policy.budget)} · {chain.data.policy.paused?'Paused':'Active'}</div></div>}
     </Panel>
     {demo&&<Panel title="Demo inventory" subtitle="Restore seeded stock counts and cancel unsigned orders." action={<Button variant="outline" disabled={reset.isPending} onClick={()=>{if(window.confirm('Restore the seeded stock quantities and cancel unsigned orders?')) reset.mutate();}}>Reset demo stock</Button>}>{reset.error&&<ErrorState error={reset.error.message}/>}</Panel>}

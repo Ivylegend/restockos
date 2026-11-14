@@ -18,11 +18,17 @@ class WorkflowError(Exception):
 
 def audit(db: Session, run_id: str | None, kind: str, message: str):
     logger.info(json.dumps({"event": kind, "run_id": run_id, "message": message}))
-    db.add(AuditEvent(run_id=run_id, kind=kind, message=message))
+    workspace_id = db.info.get("workspace_id")
+    if run_id:
+        run = db.get(AgentRun, run_id)
+        workspace_id = workspace_id or (run.workspace_id if run else None)
+    db.add(AuditEvent(workspace_id=workspace_id or "admin-demo", run_id=run_id, kind=kind, message=message))
 
 
-def lock_policy(db: Session) -> AgentPolicy:
-    policy = db.get(AgentPolicy, 1, with_for_update=True, populate_existing=True)
+def lock_policy(db: Session, workspace_id: str | None = None) -> AgentPolicy:
+    workspace_id = workspace_id or db.info.get("workspace_id", "admin-demo")
+    policy = db.scalar(select(AgentPolicy).where(AgentPolicy.workspace_id == workspace_id)
+                       .with_for_update().execution_options(populate_existing=True))
     if policy is None:
         raise WorkflowError("Seed the workspace before running procurement.")
     return policy
@@ -45,7 +51,7 @@ def request_supplier_quotes(db: Session, run: AgentRun, product: Product) -> lis
         redirect = settings.near_contract_id or "unapproved-restock-recipient.testnet"
         account = redirect if run.scenario == "redirect" and not quotes else supplier.account
         quotes.append(SupplierQuote(
-            run_id=run.id, supplier_id=supplier.id, product_id=product.id, account=account,
+            workspace_id=run.workspace_id, run_id=run.id, supplier_id=supplier.id, product_id=product.id, account=account,
             amount=str((int(product.unit_price) * quantity * supplier.price_bps + 9999) // 10000),
             quantity=quantity, lead_days=supplier.lead_days, reliability=supplier.reliability,
             status="received" if account == supplier.account else "flagged",
@@ -116,16 +122,18 @@ def check_policy(policy: AgentPolicy, quote: SupplierQuote, amount: str, scenari
 
 
 def create_purchase_order(db: Session, run: AgentRun, quote: SupplierQuote, amount: str, reason: str | None):
-    order = PurchaseOrder(id=str(uuid4()), run_id=run.id, supplier_id=quote.supplier_id,
+    order = PurchaseOrder(id=str(uuid4()), workspace_id=run.workspace_id, run_id=run.id, supplier_id=quote.supplier_id,
                           account=quote.account, amount=amount, status="rejected" if reason else "ready", reason=reason)
     db.add(order)
     db.flush()
-    db.add(PurchaseOrderItem(order_id=order.id, product_id=quote.product_id, quantity=quote.quantity))
+    db.add(PurchaseOrderItem(workspace_id=run.workspace_id, order_id=order.id, product_id=quote.product_id, quantity=quote.quantity))
     return order
 
 
-def run_agent(db: Session, scenario: str, *, scheduled: bool = False):
-    policy = lock_policy(db)
+def run_agent(db: Session, scenario: str, *, scheduled: bool = False, sandbox: bool = False,
+              workspace_id: str | None = None, allow_server_signing: bool = True):
+    workspace_id = workspace_id or db.info.get("workspace_id", "admin-demo")
+    policy = lock_policy(db, workspace_id)
     if scheduled and (
         policy.paused or not policy.auto_execute or
         db.scalar(select(BlockchainTransaction.id).where(BlockchainTransaction.status == "pending").limit(1))
@@ -134,7 +142,8 @@ def run_agent(db: Session, scenario: str, *, scheduled: bool = False):
     product = analyze_inventory(db, scenario)
     if scheduled and product is None:
         return None, None
-    run = AgentRun(id=str(uuid4()), scenario=scenario, mode="deterministic", status="scanning")
+    run = AgentRun(id=str(uuid4()), workspace_id=workspace_id, scenario=scenario,
+                    mode="sandbox" if sandbox else "deterministic", status="scanning")
     db.add(run)
     db.flush()
     if not product or policy.paused:
@@ -150,7 +159,8 @@ def run_agent(db: Session, scenario: str, *, scheduled: bool = False):
         quote = next((q for q in quotes if q.status == "flagged"), None)
         audit(db, run.id, "policy", "Supplier proposed an alternate account. The controlled demo submits it for on-chain rejection.")
     else:
-        quote, run.mode = recommend_quote(candidates) if candidates else (None, run.mode)
+        quote, run.mode = (candidates[0], "sandbox") if sandbox and candidates else (
+            recommend_quote(candidates) if candidates else (None, run.mode))
     if not quote:
         run.status = "rejected"
         audit(db, run.id, "policy", "No approved supplier quote is available.")
@@ -166,10 +176,14 @@ def run_agent(db: Session, scenario: str, *, scheduled: bool = False):
           f"Compared price, delivery and reliability. {supplier_name} accepted a counteroffer saving {savings:f} NEAR.")
     reason = check_policy(policy, quote, amount, scenario)
     order = create_purchase_order(db, run, quote, amount, reason)
+    if sandbox and not reason:
+        order.status = "simulated"
+        order.reason = "Sandbox simulation. No wallet was asked to sign and no NEAR transaction was sent."
     run.status = order.status
-    audit(db, run.id, "order", reason or "Purchase order created and ready for the Testnet policy contract.")
+    audit(db, run.id, "order", reason or ("Sandbox purchase order simulated. No NEAR transaction was sent." if sandbox
+                                            else "Purchase order created and ready for the Testnet policy contract."))
     db.commit()
-    if (policy.auto_execute or scenario == "redirect") and order.status == "ready":
+    if not sandbox and allow_server_signing and (policy.auto_execute or scenario == "redirect") and order.status == "ready":
         try:
             request_onchain_purchase(db, order.id)
         except WorkflowError as exc:
@@ -231,7 +245,7 @@ def request_onchain_purchase(db: Session, order_id: str):
             audit(db, order.run_id, "chain", order.reason)
             db.commit()
             return order
-        tx = BlockchainTransaction(order_id=order.id, hash=signed["hash"], signer=settings.near_agent_id,
+        tx = BlockchainTransaction(workspace_id=order.workspace_id, order_id=order.id, hash=signed["hash"], signer=settings.near_agent_id,
                                    contract=settings.near_contract_id, signed_payload=signed["payload"], status="pending")
         db.add(tx)
         order.status = "submitting"

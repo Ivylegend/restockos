@@ -48,3 +48,19 @@ class PolicyInput(BaseModel, extra="forbid"):
 
 class RunInput(BaseModel, extra="forbid"):
     scenario: Literal["normal", "redirect"] = "normal"
+
+
+class WalletVerifyInput(BaseModel, extra="forbid"):
+    account_id: Account
+    public_key: str = Field(min_length=8, max_length=100)
+    signature: str = Field(min_length=32, max_length=200)
+    nonce: str = Field(min_length=32, max_length=64)
+
+
+class WorkspaceContractInput(BaseModel, extra="forbid"):
+    contract_id: Account
+
+
+class TransactionVerifyInput(BaseModel, extra="forbid"):
+    order_id: str = Field(min_length=8, max_length=36)
+    hash: str = Field(min_length=32, max_length=64, pattern=r"^[1-9A-HJ-NP-Za-km-z]+$")
